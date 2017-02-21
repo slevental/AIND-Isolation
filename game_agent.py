@@ -7,6 +7,11 @@ You must test your agent's strength against a set of agents with known
 relative strength using tournament.py and include the results in your report.
 """
 import random
+import itertools
+from unionfind import UnionFind
+
+MAX_DEPTH = 16
+TIME_THRESHOLD = 100
 
 
 class Timeout(Exception):
@@ -36,9 +41,74 @@ def custom_score(game, player):
     float
         The heuristic value of the current game state to the specified player.
     """
+    return connected_components_with_backoff(game, player)
 
-    # TODO: finish this function!
-    raise NotImplementedError
+
+def connected_components_with_backoff(game, player):
+    """
+    Combination of two heuristics with back-off from one to another
+
+    :param game:
+    :param player:
+    :return:
+    """
+    score = connected_components_score(game, player)
+    return weighted_number_of_moves(game, player) if score == 0 else score
+
+
+def weighted_number_of_moves(game, player):
+    return float(len(game.get_legal_moves(player))) \
+           - float(len(game.get_legal_moves(game.get_opponent(player)))) * 1.5
+
+
+def connected_components_score(game, player):
+    return float(connected_components_diff(game, player))
+
+
+def baseline(game, player):
+    return float(len(game.get_legal_moves(player))) \
+           - float(len(game.get_legal_moves(game.get_opponent(player))))
+
+
+def neighbors(game, position):
+    """
+    Getting neighbors positions from given one
+
+    :param game:
+    :param position:
+    :return:
+    """
+    directions = [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)]
+    return [(position[0] + x, position[1] + y)
+            for (x, y) in directions
+            if game.move_is_legal((position[0] + x, position[1] + y))]
+
+
+def connected_components_diff(game, player):
+    """
+    Difference between number of connected components
+    of one player and its opponent
+
+    :param game:
+    :param player:
+    :return:
+    """
+    size = game.width * game.height
+    uf = UnionFind(size)
+    blank = game.get_blank_spaces()
+    for bs in blank:
+        for n in neighbors(game, bs):
+            uf.union(bs, n)
+    player_location = game.get_player_location(player)
+    opp_location = game.get_player_location(game.get_opponent(player))
+    for n in neighbors(game, player_location):
+        uf.union(n, player_location)
+    for n in neighbors(game, opp_location):
+        uf.union(n, opp_location)
+
+    pl_score = float(uf.components(player_location))
+    op_score = float(uf.components(opp_location))
+    return pl_score - op_score
 
 
 class CustomPlayer:
@@ -116,27 +186,45 @@ class CustomPlayer:
             (-1, -1) if there are no available legal moves.
         """
 
-        self.time_left = time_left
-
-        # TODO: finish this function!
+        # Reducing time left by some threshold - to prevent failure
+        self.time_left = lambda: time_left() - TIME_THRESHOLD
 
         # Perform any required initializations, including selecting an initial
         # move from the game board (i.e., an opening book), or returning
         # immediately if there are no legal moves
+
+        # Returning in case of no legal moves
+        if len(legal_moves) == 0:
+            return -1, -1
+
+        # Initializing best move/score
+        best_move = legal_moves[0]
+        best_score = float("-inf")
 
         try:
             # The search method call (alpha beta or minimax) should happen in
             # here in order to avoid timeout. The try/except block will
             # automatically catch the exception raised by the search method
             # when the timer gets close to expiring
-            pass
+            method = self.minimax if self.method == 'minimax' else self.alphabeta
+            if self.iterative:
+                for d in range(1, MAX_DEPTH):
+                    score, candidate = method(game, d, maximizing_player=True)
+                    if score > best_score:
+                        best_move = candidate
+                        best_score = score
+            else:
+                score, candidate = method(game, MAX_DEPTH, maximizing_player=True)
+                if score > best_score:
+                    best_move = candidate
+
 
         except Timeout:
             # Handle any actions required at timeout, if necessary
             pass
 
         # Return the best move from the last completed search iteration
-        raise NotImplementedError
+        return best_move
 
     def minimax(self, game, depth, maximizing_player=True):
         """Implement the minimax search algorithm as described in the lectures.
@@ -169,11 +257,35 @@ class CustomPlayer:
                 to pass the project unit tests; you cannot call any other
                 evaluation function directly.
         """
-        if self.time_left() < self.TIMER_THRESHOLD:
-            raise Timeout()
+        player = game.active_player if maximizing_player else game.inactive_player
 
-        # TODO: finish this function!
-        raise NotImplementedError
+        # Retrieving list of legal moves from environment
+        legal_moves = game.get_legal_moves(game.active_player)
+
+        # In case of no legal moves - returning (-1, -1)
+        if len(legal_moves) == 0:
+            return float('-inf'), (-1, -1)
+
+        score = float('-inf') if maximizing_player else float('inf')
+        optimal_move = None
+        for move in legal_moves:
+            if self.time_left() < self.TIMER_THRESHOLD:
+                raise Timeout()
+
+            new_game = game.forecast_move(move)
+
+            # In case of depth more than one - do recursive call
+            if depth > 1:
+                new_score, _ = self.minimax(new_game, depth - 1, not maximizing_player)
+            else:
+                new_score = self.score(new_game, player)
+
+            if (maximizing_player and new_score > score) or (not maximizing_player and new_score < score):
+                score = new_score
+                optimal_move = move
+
+        return score, optimal_move
+
 
     def alphabeta(self, game, depth, alpha=float("-inf"), beta=float("inf"), maximizing_player=True):
         """Implement minimax search with alpha-beta pruning as described in the
@@ -213,8 +325,48 @@ class CustomPlayer:
                 to pass the project unit tests; you cannot call any other
                 evaluation function directly.
         """
-        if self.time_left() < self.TIMER_THRESHOLD:
-            raise Timeout()
 
-        # TODO: finish this function!
-        raise NotImplementedError
+        # Get maximizing player - one we do optimization for
+        player = game.active_player if maximizing_player else game.inactive_player
+
+        # Retrieving list of legal moves from environment
+        legal_moves = game.get_legal_moves(game.active_player)
+
+        # In case of no legal moves - returning (-1, -1)
+        if len(legal_moves) == 0:
+            return float('-inf'), (-1, -1)
+
+        # Initializing score and move
+        score = float('-inf') if maximizing_player else float('inf')
+        optimal_move = None
+        random.shuffle(legal_moves)
+        for move in legal_moves:
+            # Check time and return in case of timeout
+            if self.time_left() < self.TIMER_THRESHOLD:
+                raise Timeout()
+
+            # Change environment
+            new_game = game.forecast_move(move)
+
+            # In case of depth more than one - do recursive call
+            if depth > 1:
+                new_score, _ = self.alphabeta(new_game, depth - 1, alpha, beta, not maximizing_player)
+            else:
+                new_score = self.score(new_game, player)
+
+            # If it's a maximizing player - update alpha and choose maximum score
+            if maximizing_player:
+                alpha = max(alpha, new_score)
+                score = max(score, new_score)
+                if beta <= alpha:
+                    break
+            else:
+                beta = min(beta, new_score)
+                score = min(score, new_score)
+                if beta <= alpha:
+                    break
+
+            if score == new_score:
+                optimal_move = move
+
+        return score, optimal_move
